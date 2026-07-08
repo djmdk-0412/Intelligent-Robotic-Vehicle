@@ -1,0 +1,31 @@
+const int trigPin = 9;
+const int echoPin = 10;
+long duration;
+int distanceCm;
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  Serial.begin(9600); 
+}
+
+void loop() {
+  // 1. Trigger the sensor
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // 2. Read the echo (with a 30ms timeout so it doesn't freeze)
+  duration = pulseIn(echoPin, HIGH, 30000);
+
+  // 3. Calculate distance in centimeters
+  distanceCm = duration * 0.034 / 2; 
+
+  // 4. Send ONLY the final number down the USB cable
+  Serial.println(distanceCm);
+  
+  // 5. Patiently wait 50ms so LabVIEW has time to read it
+  delay(100); 
+}
