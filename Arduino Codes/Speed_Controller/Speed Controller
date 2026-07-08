@@ -1,0 +1,230 @@
+#include <Servo.h>
+
+
+// 1. PIN DEFINITIONS
+const int buzzerPin = 4; 
+const int servoPin = 11; 
+const int enablePin = 8;  // CNC Shield EN Pin 
+
+// Stepper Motors
+const int stepPinRight = 2;  
+const int dirPinRight = 5;  
+const int stepPinLeft = 3; 
+const int dirPinLeft = 6; 
+
+// LIGHT SENSOR
+const int luxPin = A1; 
+
+
+//SENSOR CALIBRATION ARRAYS 
+
+const int numPoints = 5;
+
+// X-Axis: Your Arduino ADC Readings
+// Dark (0V) -> Room Light -> Bright Light (~2.5V to 3V)
+int adcLevels[numPoints] = {350, 445, 500, 520, 560}; 
+
+// Y-Axis: Target Motor Delay (Darkest/Slowest -> Brightest/Fastest)
+int targetSpeeds[numPoints] = {3000, 2000, 1500, 1000, 800}; 
+
+Servo steeringServo;
+unsigned long previousMillis = 0;
+
+int requestedSpeedDelay = 800; // The base speed commanded by LabVIEW Slider
+int currentMotorDelay = 800;   // The actual smooth, capped physical speed
+
+void setup() {
+  Serial.begin(9600); 
+  Serial.setTimeout(50); 
+
+  // Output Pins
+  pinMode(buzzerPin, OUTPUT); 
+  pinMode(13, OUTPUT); 
+  pinMode(stepPinRight, OUTPUT); pinMode(dirPinRight, OUTPUT);
+  pinMode(stepPinLeft, OUTPUT); pinMode(dirPinLeft, OUTPUT);
+  pinMode(enablePin, OUTPUT);
+  
+  // Wake up the stepper drivers
+  digitalWrite(enablePin, LOW); 
+
+  pinMode(luxPin, INPUT);
+
+  steeringServo.attach(servoPin);
+  steeringServo.write(90); 
+}
+
+void loop() {
+  // 1. Keep the LabVIEW UI alive even when the motors are fully stopped!
+  checkLiveUpdates();
+
+  // 2. THE BRAIN TRANSLATION (Parse full commands)
+  if (Serial.available() > 0) {
+    delay(30); 
+    String fullCommand = Serial.readString();
+    fullCommand.trim();
+
+    while (fullCommand.length() > 0) {
+      int commaIndex = fullCommand.indexOf(',');
+      String piece;
+      
+      if (commaIndex == -1) {
+        piece = fullCommand; 
+        fullCommand = ""; 
+      } else {
+        piece = fullCommand.substring(0, commaIndex); 
+        fullCommand = fullCommand.substring(commaIndex + 1); 
+      }
+      piece.trim(); 
+      executeMovement(piece); 
+    }
+  }
+}
+
+// ==========================================
+//NEW: THE REAL-TIME MULTITASKER
+// ==========================================
+void checkLiveUpdates() {
+  // --- PART A: UNFREEZE THE DASHBOARD ---
+  // Send telemetry back to LabVIEW every 100ms
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= 100) { 
+    previousMillis = currentMillis; 
+    
+    updateAdaptiveSpeed(); // Update the safety math!
+    
+    int currentLightLevel = analogRead(luxPin);
+    Serial.print(currentLightLevel); 
+    Serial.print(",");
+    Serial.print(calculatePiecewiseSpeed(currentLightLevel)); 
+    Serial.print(",");
+    Serial.println(currentMotorDelay); 
+  }
+
+  // --- PART B: UNFREEZE THE SPEED SLIDER ---
+  // While driving, peek at the incoming LabVIEW data. If we see a 'D' (Delay command),
+  // snatch the number instantly so the slider works mid-drive!
+  while (Serial.available() > 0) {
+    char c = Serial.peek(); 
+    
+    if (c == 'D') {
+       Serial.read(); // Consume the 'D'
+       int newSpeed = Serial.parseInt(); // Grab the new slider value
+       if (newSpeed > 0) requestedSpeedDelay = newSpeed; // Apply it instantly!
+    } 
+    else if (c == 'M' || c == 'S' || c == 'Z' || c == 'R' || c == 'L') {
+       // We found a movement command! Leave it in the buffer for the main loop to handle later.
+       break; 
+    } 
+    else {
+       Serial.read(); // Throw away commas and garbage so the buffer stays clean
+    }
+  }
+}
+
+// ==========================================
+// THE STEPPER TRANSLATOR
+// ==========================================
+void executeMovement(String cmd) {
+  if (cmd.length() < 2) return; 
+
+  char motorType = cmd.charAt(0); 
+  int value = cmd.substring(1).toInt(); 
+
+  if (motorType == 'D') { requestedSpeedDelay = value; } 
+  else if (motorType == 'S') { steeringServo.write(value); } 
+  else if (motorType == 'Z') { digitalWrite(buzzerPin, value == 1 ? HIGH : LOW); }
+  else if (motorType == 'R') { driveRightMotor(value); } 
+  else if (motorType == 'L') { driveLeftMotor(value); }
+  else if (motorType == 'M') { driveBothMotors(value); }
+}
+
+
+// PIECEWISE LINEAR MAPPING 
+
+int calculatePiecewiseSpeed(int currentADC) {
+  float targetDelay = 3000; // Default to slowest speed in the dark
+
+  // Safety boundaries
+  if (currentADC <= 350) return 3000; // Dark = Slow
+  if (currentADC >= 560) return 800;  // Bright = Fast
+
+  // Recalculated Negative-Slope Equations to fix the graph's logic!
+  if (currentADC > 350 && currentADC <= 445) {
+    targetDelay = (-10.53 * currentADC) + 6685;
+  } 
+  else if (currentADC > 445 && currentADC <= 500) {
+    targetDelay = (-9.09 * currentADC) + 6045;
+  } 
+  else if (currentADC > 500 && currentADC <= 520) {
+    targetDelay = (-25.0 * currentADC) + 14000;
+  } 
+  else if (currentADC > 520 && currentADC <= 560) {
+    targetDelay = (-5.0 * currentADC) + 3600;
+  }
+
+  // Cast the floating-point math back into an integer for the delay
+  return (int)targetDelay; 
+}
+
+
+// SMOOTH DECELERATION LOGIC 
+
+void updateAdaptiveSpeed() {
+  int currentLightLevel = analogRead(luxPin); 
+  int lightCapDelay = calculatePiecewiseSpeed(currentLightLevel);
+  
+  int targetDelay = max(requestedSpeedDelay, lightCapDelay);
+  
+  if (currentMotorDelay < targetDelay) {
+    currentMotorDelay += 50; 
+    if (currentMotorDelay > targetDelay) currentMotorDelay = targetDelay;
+  } 
+  else if (currentMotorDelay > targetDelay) {
+    currentMotorDelay -= 50; 
+    if (currentMotorDelay < targetDelay) currentMotorDelay = targetDelay;
+  }
+}
+
+
+// MOTOR DRIVING FUNCTIONS (NOW WITH REAL-TIME UPDATES!)
+
+void driveRightMotor(int steps) {
+  if (steps > 0) { digitalWrite(dirPinRight, HIGH); } 
+  else { digitalWrite(dirPinRight, LOW); steps = abs(steps); } 
+
+  for(int i = 0; i < steps; i++) {
+    if (i % 20 == 0) checkLiveUpdates(); 
+    
+    digitalWrite(stepPinRight, HIGH); delayMicroseconds(currentMotorDelay);
+    digitalWrite(stepPinRight, LOW); delayMicroseconds(currentMotorDelay);
+  }
+}
+
+void driveLeftMotor(int steps) {
+  if (steps > 0) { digitalWrite(dirPinLeft, HIGH); } 
+  else { digitalWrite(dirPinLeft, LOW); steps = abs(steps); } 
+
+  for(int i = 0; i < steps; i++) {
+    if (i % 20 == 0) checkLiveUpdates();
+    digitalWrite(stepPinLeft, HIGH); delayMicroseconds(currentMotorDelay);
+    digitalWrite(stepPinLeft, LOW); delayMicroseconds(currentMotorDelay);
+  }
+}
+
+void driveBothMotors(int steps) {
+  if (steps > 0) { 
+    digitalWrite(dirPinRight, HIGH); digitalWrite(dirPinLeft, HIGH); 
+  } else { 
+    digitalWrite(dirPinRight, LOW); digitalWrite(dirPinLeft, LOW); 
+    steps = abs(steps); 
+  }
+
+  for(int i = 0; i < steps; i++) {
+    if (i % 20 == 0) checkLiveUpdates(); 
+    
+    digitalWrite(stepPinRight, HIGH); digitalWrite(stepPinLeft, HIGH);
+    delayMicroseconds(currentMotorDelay);
+    digitalWrite(stepPinRight, LOW); digitalWrite(stepPinLeft, LOW);
+    delayMicroseconds(currentMotorDelay);
+  }
+}
