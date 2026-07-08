@@ -1,0 +1,139 @@
+#include <Servo.h>
+
+
+const int servoPin = 11; 
+const int enablePin = 8;  // CNC Shield EN Pin 
+
+// Stepper Motors
+const int stepPinRight = 2;  
+const int dirPinRight = 5;  
+const int stepPinLeft = 3; 
+const int dirPinLeft = 6; 
+
+// PARKING SENSORS ONLY
+const int parkTrigPin = 9;   
+const int parkEchoPin = 10;  
+
+Servo steeringServo;
+unsigned long previousMillis = 0;
+const long pingInterval = 50; 
+
+
+int stepDelay = 2500; 
+
+void setup() {
+  Serial.begin(9600); 
+  Serial.setTimeout(50); 
+
+  // Output Pins
+  
+  pinMode(13, OUTPUT); 
+  pinMode(stepPinRight, OUTPUT); pinMode(dirPinRight, OUTPUT);
+  pinMode(stepPinLeft, OUTPUT); pinMode(dirPinLeft, OUTPUT);
+  pinMode(enablePin, OUTPUT);
+  
+  // Wake up the stepper drivers
+  digitalWrite(enablePin, LOW); 
+
+  // Sensor Pins
+  pinMode(parkTrigPin, OUTPUT); 
+  pinMode(parkEchoPin, INPUT);
+
+  steeringServo.attach(servoPin);
+  steeringServo.write(90); 
+}
+
+void loop() {
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= pingInterval) {
+    previousMillis = currentMillis; 
+    
+    // 1. Read Parking Ultrasonic
+    digitalWrite(parkTrigPin, LOW); delayMicroseconds(2);
+    digitalWrite(parkTrigPin, HIGH); delayMicroseconds(10);
+    digitalWrite(parkTrigPin, LOW);
+    long parkDuration = pulseIn(parkEchoPin, HIGH, 30000);
+    int parkDistance = parkDuration * 0.034 / 2; 
+
+    // 2. Send ONLY the parking data cleanly to LabVIEW
+    if (Serial.available() == 0) {
+      Serial.println(parkDistance);
+    }
+  }
+
+  // THE BRAIN TRANSLATION (Listening to LabVIEW) ---
+  if (Serial.available() > 0) {
+    delay(30); 
+    String fullCommand = Serial.readString();
+    fullCommand.trim();
+
+    while (fullCommand.length() > 0) {
+      int commaIndex = fullCommand.indexOf(',');
+      String piece;
+      
+      if (commaIndex == -1) {
+        piece = fullCommand; 
+        fullCommand = ""; 
+      } else {
+        piece = fullCommand.substring(0, commaIndex); 
+        fullCommand = fullCommand.substring(commaIndex + 1); 
+      }
+      piece.trim(); 
+      executeMovement(piece); 
+    }
+  }
+}
+
+
+// THE STEPPER TRANSLATOR
+
+void executeMovement(String cmd) {
+  if (cmd.length() < 2) return; 
+
+  char motorType = cmd.charAt(0); 
+  int value = cmd.substring(1).toInt(); 
+
+  // No "D" command here! Speed is locked!
+  if (motorType == 'S') { steeringServo.write(value); } 
+  //else if (motorType == 'Z') { digitalWrite(buzzerPin, value == 1 ? HIGH : LOW); }
+  else if (motorType == 'R') { driveRightMotor(value); } 
+  else if (motorType == 'L') { driveLeftMotor(value); }
+  else if (motorType == 'M') { driveBothMotors(value); }
+}
+
+void driveRightMotor(int steps) {
+  if (steps > 0) { digitalWrite(dirPinRight, HIGH); } 
+  else { digitalWrite(dirPinRight, LOW); steps = abs(steps); } 
+
+  for(int i = 0; i < steps; i++) {
+    digitalWrite(stepPinRight, HIGH); delayMicroseconds(stepDelay);
+    digitalWrite(stepPinRight, LOW); delayMicroseconds(stepDelay);
+  }
+}
+
+void driveLeftMotor(int steps) {
+  if (steps > 0) { digitalWrite(dirPinLeft, HIGH); } 
+  else { digitalWrite(dirPinLeft, LOW); steps = abs(steps); } 
+
+  for(int i = 0; i < steps; i++) {
+    digitalWrite(stepPinLeft, HIGH); delayMicroseconds(stepDelay);
+    digitalWrite(stepPinLeft, LOW); delayMicroseconds(stepDelay);
+  }
+}
+
+void driveBothMotors(int steps) {
+  if (steps > 0) { 
+    digitalWrite(dirPinRight, HIGH); digitalWrite(dirPinLeft, HIGH); 
+  } else {  
+    digitalWrite(dirPinRight, LOW); digitalWrite(dirPinLeft, LOW); 
+    steps = abs(steps); 
+  }
+
+  for(int i = 0; i < steps; i++) {
+    digitalWrite(stepPinRight, HIGH); digitalWrite(stepPinLeft, HIGH);
+    delayMicroseconds(stepDelay);
+    digitalWrite(stepPinRight, LOW); digitalWrite(stepPinLeft, LOW);
+    delayMicroseconds(stepDelay);
+  }
+}
